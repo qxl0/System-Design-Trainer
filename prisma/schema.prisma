@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Question {
+  id          String    @id @default(cuid())
+  title       String
+  prompt      String
+  difficulty  String
+  category    String
+  tags        String
+  modelAnswer String
+  sessions    Session[]
+  progress    Progress?
+  createdAt   DateTime  @default(now())
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  questionId   String
+  question     Question @relation(fields: [questionId], references: [id])
+  answer       String
+  aiFeedback   String
+  score        Int
+  durationSecs Int
+  createdAt    DateTime @default(now())
+}
+
+model Progress {
+  id           String   @id @default(cuid())
+  questionId   String   @unique
+  question     Question @relation(fields: [questionId], references: [id])
+  interval     Int      @default(1)
+  easeFactor   Float    @default(2.5)
+  nextReviewAt DateTime @default(now())
+  lastScore    Int?
+  updatedAt    DateTime @updatedAt
+}
