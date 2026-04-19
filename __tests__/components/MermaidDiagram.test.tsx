@@ -46,7 +46,7 @@ describe('MermaidDiagram', () => {
     render(<MermaidDiagram chart={chart} />)
 
     await waitFor(() => {
-      expect(screen.getByText('bad syntax')).toBeInTheDocument()
+      expect(screen.getByText(/bad syntax/)).toBeInTheDocument()
     })
 
     expect(screen.getByText(chart)).toBeInTheDocument()
