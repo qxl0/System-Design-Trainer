@@ -20,6 +20,12 @@ describe('QuestionRow', () => {
     expect(screen.getByText('Design a URL Shortener')).toBeInTheDocument()
   })
 
+  it('renders tags for the question', () => {
+    render(<table><tbody><QuestionRow question={q} /></tbody></table>)
+    expect(screen.getByText('#redis')).toBeInTheDocument()
+    expect(screen.getByText('#sql')).toBeInTheDocument()
+  })
+
   it('shows "Not started" for not_started status', () => {
     render(<table><tbody><QuestionRow question={q} /></tbody></table>)
     expect(screen.getByText('Not started')).toBeInTheDocument()

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import type { AiFeedback, Question } from '@/types'
+import MarkdownContent from '@/components/MarkdownContent'
 
 interface StoredFeedback {
   feedback: AiFeedback
@@ -127,9 +128,7 @@ export default function FeedbackPage() {
       {rated && (
         <div className="bg-gray-800 rounded-xl border border-gray-700 p-6">
           <h2 className="text-lg font-bold text-gray-100 mb-4">📖 Model Answer</h2>
-          <div className="prose prose-invert prose-sm max-w-none text-gray-300 whitespace-pre-wrap font-mono text-sm leading-relaxed">
-            {question.modelAnswer}
-          </div>
+          <MarkdownContent content={question.modelAnswer} className="space-y-4" />
         </div>
       )}
 

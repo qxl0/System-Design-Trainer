@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import type { Question } from '@/types'
+import MarkdownContent from '@/components/MarkdownContent'
 
 const MermaidDiagram = dynamic(() => import('@/components/MermaidDiagram'), { ssr: false })
 
@@ -96,9 +97,7 @@ export default function StudyPage() {
         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
           Model Answer
         </h2>
-        <div className="prose prose-invert prose-sm max-w-none text-gray-300 whitespace-pre-wrap font-mono text-sm leading-relaxed">
-          {question.modelAnswer}
-        </div>
+        <MarkdownContent content={question.modelAnswer} className="space-y-4" />
       </div>
 
       {/* Study Notes (Alex Xu content) */}
@@ -107,9 +106,7 @@ export default function StudyPage() {
           <h2 className="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">
             📖 Study Notes — Alex Xu
           </h2>
-          <div className="prose prose-invert prose-sm max-w-none text-blue-100 whitespace-pre-wrap text-sm leading-relaxed">
-            {question.studyNotes}
-          </div>
+          <MarkdownContent content={question.studyNotes} className="space-y-4" />
         </div>
       )}
 

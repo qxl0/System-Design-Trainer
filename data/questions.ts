@@ -2072,4 +2072,998 @@ LSM Tree (write path):
 - If different, bisect and recurse → find exact diverged ranges in O(log n)
 - Repair only diverged ranges (efficient for large key spaces)`,
   },
+  {
+    title: 'Design a Proximity Service',
+    prompt:
+      "Design a service like Yelp that returns nearby businesses given a user's location and search radius. The system must handle 100M DAU, support radii of 0.5–20 km, and return results with low latency.",
+    difficulty: 'Medium',
+    category: 'Location',
+    tags: ['geohash', 'quadtree', 'redis', 'mysql', 'spatial-index'],
+    modelAnswer: `## Proximity Service Design
+
+### Requirements
+- Functional: search nearby businesses by lat/long + radius (0.5, 1, 2, 5, 20 km); view business details; CRUD for business owners
+- Non-functional: 100M DAU, 5K search QPS, low latency, high availability, eventual consistency for writes
+
+### API
+- GET /v1/search/nearby?lat=&long=&radius= → paginated business list
+- GET /v1/businesses/{id} → business detail
+- POST/PUT/DELETE /v1/businesses → owner CRUD (low volume)
+
+### Core Algorithm: Geohash
+Geohash recursively divides earth into a grid and encodes each cell as a base-32 string.
+Each extra character = 32x finer resolution.
+
+Radius to precision mapping:
+- 0.5 km, 1 km → precision 6 (~1.2 km cells)
+- 2 km, 5 km → precision 5 (~4.9 km cells)
+- 20 km → precision 4 (~39 km cells)
+
+Query steps:
+1. Compute user's geohash at the target precision
+2. Fetch all businesses in that cell from the index
+3. Fetch 8 neighboring cells (fix boundary problem — adjacent points can have different hashes)
+4. Filter by exact Haversine distance
+5. Sort and paginate
+
+Expand search: if too few results, remove last character (step up one precision level = 32x larger area).
+
+### Storage
+geohash_index table (MySQL):
+- geohash VARCHAR(6) + business_id BIGINT → PRIMARY KEY
+- ~1.7 GB total — fits in memory on a single server
+
+business table (MySQL):
+- business_id, name, lat, long, address, star_rating
+
+Redis Cache:
+- Key: "geohash:{hash}" → List<business_id>, TTL 24h
+- Key: "business:{id}" → JSON object, TTL 24h
+- Caches all 3 precision levels (4, 5, 6)
+
+### Architecture
+- Load Balancer → Location-Based Service (LBS, stateless) + Business Service
+- LBS: Redis → MySQL replica on cache miss
+- Business Service: writes to MySQL primary, triggers nightly batch to rebuild geohash index
+- Multi-region deployment for latency and data residency
+
+### Scale
+- Read:Write = 100:1 → cache aggressively at geohash granularity (not raw lat/long)
+- Geohash index (1.7 GB) fits in Redis — no DB sharding needed
+- Nightly propagation of business edits acceptable (changes rarely need to be instant)
+
+### Alternatives Considered
+- Quadtree: in-memory tree, supports k-NN queries, harder to implement; 2-min startup to build from 200M records
+- Google S2: Hilbert curve mapping, arbitrary polygons, used by Google/Uber; most powerful but hardest to explain`,
+    mermaidDiagram: `graph TD
+  Client -->|search request| LB[Load Balancer]
+  LB --> LBS[Location-Based Service\\nstateless, horizontally scaled]
+  LB --> BS[Business Service]
+  LBS --> RC[(Redis Cache\\ngeohash→business_ids\\nbusiness_id→details\\nTTL 24h)]
+  LBS -->|cache miss| GI[(Geohash Index\\nMySQL replica\\n~1.7 GB)]
+  LBS -->|detail fetch| BD[(Business DB\\nMySQL replica)]
+  BS --> BDW[(Business DB\\nMySQL primary)]
+  BDW -->|nightly batch| GI
+  RC -.->|miss| GI`,
+    asciiDiagram: `User (lat, long, radius)
+  |
+  v
+Load Balancer
+  |
+  |---> Location-Based Service (stateless)
+  |         |
+  |         |-- 1. compute geohash at precision P
+  |         |-- 2. fetch target cell + 8 neighbors
+  |         |         |
+  |         |    Redis Cache --miss--> MySQL Geohash Index
+  |         |         |                  (geohash -> business_ids)
+  |         |         v
+  |         |-- 3. Haversine distance filter
+  |         --- 4. fetch business details -> return
+  |
+  ---> Business Service (low QPS)
+            |
+       MySQL Primary --nightly batch--> Geohash Index`,
+    studyNotes: `## Alex Xu Vol 2, Chapter 1 — Proximity Service
+
+### Why Geohash Wins in Interviews
+- Simple string prefix operations — no tree construction, no in-memory management
+- Native Redis string keys — cache geohash cells directly
+- Boundary problem solved by querying 9 cells (target + 8 neighbors)
+- Easy to explain: "divide earth into grids, encode as base-32 string"
+
+### Precision Cheat Sheet
+| Precision | Cell Size | Search Radius |
+|-----------|-----------|---------------|
+| 4 | ~39 km | 20 km |
+| 5 | ~4.9 km | 2-5 km |
+| 6 | ~1.2 km | 0.5-1 km |
+
+### Boundary Problem
+Two points physically adjacent can have completely different geohash strings if they straddle a cell boundary. Always query 9 cells. All geohash libraries provide a neighbors() function.
+
+### Expanding Radius
+Remove the last character of the geohash to jump one precision level up (32x larger area). Repeat until you have >= K results.
+
+### Scale Numbers
+- 100M DAU x 5 searches/day / 86,400s = ~5,000 QPS
+- 200M businesses x 8 bytes/entry x 6 precision levels ≈ 1.7 GB index — fits in Redis
+- Multi-region deployment: Redis + MySQL replicas per region
+
+### Business Updates
+- Changes propagate nightly (not real-time) — acceptable because business info rarely changes
+- Nightly batch job rebuilds geohash index from business table
+
+### Why Not Quadtree?
+- Requires 2+ minutes to build from 200M records at startup
+- Must handle graceful warm-up (health-checks during build)
+- Updates require tree re-traversal or incremental patching — complex
+- Geohash index is just SQL rows — trivially replicable and cacheable`,
+  },
+  {
+    title: 'Design Nearby Friends',
+    prompt:
+      'Design a real-time feature like Facebook Nearby Friends where opted-in users can see friends within a 5-mile radius with distance and last-seen time, updated every 30 seconds. Scale to 100M DAU.',
+    difficulty: 'Hard',
+    category: 'Location',
+    tags: ['websocket', 'redis-pubsub', 'cassandra', 'geohash', 'fan-out'],
+    modelAnswer: `## Nearby Friends Design
+
+### Requirements
+- Functional: see opted-in friends within 5 miles; distance + last-seen timestamp; refreshes every ~30s; opt-out
+- Non-functional: 100M DAU, 10M concurrent users, low latency (seconds), eventual consistency fine
+
+### Scale Estimates
+- 10M concurrent users sending location every 30s → 334K location updates/sec
+- Each user has ~400 friends, 10% online → ~40 online friends per user
+- Fan-out: 334K x 40 = ~14M pushes/sec
+
+### Transport: WebSocket
+HTTP polling at 334K QPS would require 334K x 40 = 13M DB reads/sec. Impossible.
+WebSocket: persistent, full-duplex, client holds one connection.
+
+Messages:
+- Client to Server: location_update {lat, long, timestamp} every 30s
+- Server to Client: friend_location_update {friend_id, lat, long, distance, timestamp}
+- Server to Client: init_nearby_friends (on connect, send initial list)
+
+### Core Mechanism: Redis Pub/Sub Fan-out
+Each user gets a dedicated pub/sub channel: channel:user_{id}
+
+Flow on location update from User A:
+1. Write {lat, long, ts} to Redis Location Cache (key: user:{id}, TTL: 10 min)
+2. Append to Cassandra location history
+3. Publish to channel:user_A
+4. All WebSocket servers that host one of A's friends are subscribed to channel:user_A
+5. Each server receives the message, computes Haversine distance to the friend
+6. If distance <= 5 miles → push update to friend's WebSocket connection
+
+Redis pub/sub servers: 14M pushes/sec / 100K per server = ~140 Redis servers
+
+### Architecture
+- Load Balancer → WebSocket Servers (stateful) + REST API Servers (stateless)
+- Service Discovery (Zookeeper/etcd): tracks user_id → WebSocket server mapping
+- Redis Location Cache: latest position per user (TTL 10 min, auto-evicts stale)
+- Redis Pub/Sub: ~140 shards, consistent hashing assigns user channels to shards
+- Cassandra: append-only location history (user_id, timestamp → lat/long)
+- MySQL: user profiles + friend graph (sharded by user_id)
+
+### Storage
+Redis Location Cache:
+- Key: user:{id}, Value: {lat, long, ts}, TTL: 600s
+
+Cassandra Location History:
+- Partition key: user_id, Clustering key: timestamp DESC
+- Write-optimized LSM tree; handles millions of writes/sec
+
+Friendship DB (MySQL):
+- users(user_id, name, opt_in_nearby)
+- friendships(user_id, friend_id)
+
+### Key Design Decisions
+- Push vs Pull: Push fan-out via pub/sub. Pull would require 13M reads/sec on friendship DB.
+- Redis Pub/Sub vs Kafka: Pub/sub is ephemeral (no persistence), lower latency. Location updates are fire-and-forget.
+- WebSocket vs SSE: WebSocket preferred for bidirectional flow.
+- Max friends cap: 5,000 friends to bound worst-case fan-out per update.`,
+    mermaidDiagram: `graph TD
+  Mobile[Mobile Client] -->|WebSocket| LB[Load Balancer]
+  LB -->|Persistent WS| WSS[WebSocket Server Pool\\nstateful, 1 per user]
+  WSS -->|Publish location| RPS[(Redis Pub/Sub\\n~140 shards\\nchannel per user)]
+  WSS -->|Write position| RLC[(Redis Location Cache\\nuser→lat/long/ts\\nTTL 10min)]
+  WSS -->|Append| CH[(Cassandra\\nLocation History)]
+  WSS -->|Read friends| FDB[(Friendship DB\\nMySQL sharded)]
+  RPS -->|Push to subscribers| WSS
+  WSS -->|Push update| Mobile
+  SD[Service Discovery\\nZookeeper] -.->|user→server mapping| WSS
+  LB --> REST[REST API Servers\\nstateless]
+  REST --> FDB`,
+    asciiDiagram: `Mobile Client
+  |  (sends location every 30s)
+  |
+  v
+Load Balancer
+  |
+  v
+WebSocket Server (stateful, holds persistent connections)
+  |
+  |-- 1. Write to Redis Location Cache (TTL 10 min)
+  |         user:{id} -> {lat, long, ts}
+  |
+  |-- 2. Append to Cassandra Location History
+  |         (user_id, timestamp) -> {lat, long}
+  |
+  --- 3. Publish to Redis Pub/Sub: channel:user_{id}
+            |
+            v (fan-out to ~40 subscribers)
+       WebSocket Servers that host A's online friends
+            |
+            |-- 4. Compute Haversine distance
+            --- 5. If <= 5 miles -> push to friend's WebSocket connection
+
+Service Discovery (Zookeeper): user_id -> WebSocket server address`,
+    studyNotes: `## Alex Xu Vol 2, Chapter 3 — Nearby Friends
+
+### Key Numbers
+| Metric | Value |
+|--------|-------|
+| Concurrent users | 10M |
+| Location update interval | 30 seconds |
+| Location update QPS | 334,000/sec |
+| Avg online friends per user | ~40 |
+| Fan-out QPS | ~14 million/sec |
+| Redis pub/sub servers needed | ~140 |
+
+### Why WebSocket (Not HTTP Polling)
+Polling at 334K QPS x 40 friends = 13M DB reads/sec — impossible.
+WebSocket persistent connection: client holds one long-lived connection. Server pushes updates down the same pipe.
+
+### Redis Pub/Sub Architecture
+Each active user gets a channel: channel:user_{id}
+- No persistent state (messages not stored) — ephemeral by design
+- Losing one location update is acceptable (next one arrives in 30s)
+- Consistent hashing assigns channels to servers → minimizes reshuffling on scale events
+- 140 servers x 100K pushes/server/sec = 14M pushes/sec capacity
+
+### WebSocket Server — Stateful Considerations
+- Each server tracks which friends are subscribed to which channels
+- On reconnect: consistent hashing in LB routes client to same server → minimal resubscription
+- Graceful shutdown: drain mode → stop accepting new connections → clients reconnect naturally
+- Service Discovery (Zookeeper): maps user_id → server address for direct routing
+
+### Location Cache TTL Design
+- TTL 10 minutes: auto-evicts stale positions without explicit cleanup
+- If user goes offline (no update for 10 min), cache entry expires → removed from nearby friends list automatically
+
+### Geohash Extension for Nearby Strangers
+1. Pool of geohash channels (e.g., channel:geohash_9q8yy)
+2. User subscribes to their current geohash + 8 neighbors
+3. On movement across cell boundary: unsubscribe old + subscribe new
+4. Anyone publishing to that channel appears on your radar
+
+### Redis Pub/Sub vs Kafka
+| Feature | Redis Pub/Sub | Kafka |
+|---------|--------------|-------|
+| Persistence | No | Yes |
+| Latency | Sub-ms | Low ms |
+| Fan-out | Native | Consumer groups |
+| Best for | Ephemeral real-time | Durable event stream |
+Location updates are ephemeral → Redis Pub/Sub wins`,
+  },
+  {
+    title: 'Design Google Maps',
+    prompt:
+      'Design a mapping service like Google Maps that supports map tile rendering, place search, route planning, and live traffic updates. The system should scale globally and deliver low-latency map interactions on mobile and web clients.',
+    difficulty: 'Hard',
+    category: 'Location',
+    tags: ['map-tiles', 'routing', 'traffic', 'geospatial', 'cdn'],
+    modelAnswer: `## Google Maps Design
+
+### Requirements
+- Functional: pan/zoom map, place search, route planning, ETA, traffic overlays
+- Non-functional: global coverage, low latency on mobile, high availability, frequent traffic refreshes
+
+### Core Subsystems
+- Tile Service: serves raster/vector map tiles for each zoom level
+- Search Service: geospatial index for addresses, POIs, autocomplete
+- Routing Service: computes shortest/fastest path between origin and destination
+- Traffic Service: ingests GPS probes and road events, updates edge weights
+
+### Map Tiles
+- Pre-render base map tiles offline from road/building/source datasets
+- Key by {z}/{x}/{y}; store in object storage and serve through CDN
+- Vector tiles reduce bandwidth and let clients style dynamically
+
+### Search
+- Geospatial index over places using S2 cells or geohash
+- Autocomplete index by prefix + popularity
+- Query flow: prefix search + nearby ranking + exact place lookup
+
+### Routing
+- Model road network as weighted graph: intersections = nodes, road segments = edges
+- Use A* with heuristics for city-scale routing; contraction hierarchies for faster long-distance routes
+- Return primary route plus alternatives
+
+### Traffic
+- Clients upload anonymized GPS samples
+- Stream processing aggregates speed per road segment every few seconds
+- Routing service uses dynamic edge weights for ETA and reroutes
+
+### Storage
+- Road graph + metadata: sharded graph store or specialized routing DB
+- Place metadata: distributed key-value / search index
+- Traffic state: in-memory cache + append-only stream for history
+
+### Scale
+- CDN handles most tile reads
+- Search and routing are stateless API layers over indexed stores
+- Traffic pipeline is write-heavy; route requests are CPU-heavy`,
+    mermaidDiagram: `graph LR
+  Client[Mobile/Web Client] -->|tiles| CDN[CDN]
+  CDN --> TileStore[(Object Storage\\nvector/raster tiles)]
+  Client -->|search| SearchAPI[Search API]
+  SearchAPI --> PlaceIndex[(Geospatial Place Index)]
+  Client -->|route request| RouteAPI[Routing API]
+  RouteAPI --> RoadGraph[(Road Graph Store)]
+  RouteAPI --> TrafficCache[(Traffic Cache)]
+  Client -->|GPS probes| Ingest[Traffic Ingestion]
+  Ingest --> Stream[Kafka / Stream Processor]
+  Stream --> TrafficCache`,
+    asciiDiagram: `MAP VIEW:
+  Client ──► CDN ──► Tile Store
+            (z/x/y tiles cached at edge)
+
+SEARCH:
+  Client ──► Search API ──► Geospatial Place Index
+                          └──► Prefix/Autocomplete Index
+
+ROUTING:
+  Client ──► Routing API ──► Road Graph
+                          └──► Traffic Cache
+
+TRAFFIC:
+  GPS Probes ──► Ingestion ──► Stream Processing ──► Road segment speeds`,
+    studyNotes: `## Alex Xu Vol 2 — Google Maps
+
+### Interview Framing
+- Split the system into 4 parts: tiles, search, routing, traffic
+- Clarify that map browsing is a read-heavy CDN problem, while routing is a graph algorithm problem
+
+### Tile Pyramid
+- World map is divided into tiles by zoom level
+- Tile key format: z/x/y
+- CDN cache hit ratio is critical because tile reads dominate traffic
+- Vector tiles are preferred on modern clients because they are smaller and styleable
+
+### Routing Algorithms
+- Dijkstra works conceptually but is too slow at global scale
+- A* improves single-route performance with a distance heuristic
+- Contraction hierarchies or precomputed shortcuts help for fast long routes
+
+### Traffic Updates
+- GPS samples update edge weights on the road graph
+- Stream processor computes average speed per segment over short windows
+- Route ETA becomes a function of both static distance and dynamic traffic
+
+### Key Trade-offs
+- Precompute aggressively for tiles and road hierarchy
+- Compute on demand for route requests
+- Keep traffic in memory for fast reads; persist the raw event stream for replay and analytics`,
+  },
+  {
+    title: 'Design a Distributed Message Queue',
+    prompt:
+      'Design a distributed message queue like Kafka or Pulsar that supports durable publish/subscribe messaging, horizontal scaling, consumer replay, and high throughput across multiple brokers.',
+    difficulty: 'Hard',
+    category: 'Messaging',
+    tags: ['kafka', 'partitioning', 'replication', 'consumer-groups', 'log'],
+    modelAnswer: `## Distributed Message Queue Design
+
+### Requirements
+- Functional: publish, subscribe, replay by offset, ordering within partition, retention
+- Non-functional: high throughput, durability, horizontal scaling, fault tolerance
+
+### Data Model
+- Topic → partitions
+- Partition = append-only log of messages
+- Message identified by monotonically increasing offset
+
+### Write Path
+1. Producer sends message to topic
+2. Broker routes to partition (round robin or key-based hashing)
+3. Leader appends message to local log and fsyncs based on durability policy
+4. Followers replicate the message
+5. Ack after leader-only or quorum replication depending on settings
+
+### Read Path
+- Consumers pull from assigned partitions
+- Each consumer group stores offsets independently
+- Replay = reset offset and read old messages again
+
+### Partitioning
+- Hash on message key to preserve ordering for related events
+- More partitions = more parallelism, but higher coordination overhead
+
+### Replication
+- Each partition has one leader and N-1 followers
+- Controller elects a new leader on broker failure
+- In-sync replicas (ISR) determine safe ack policies
+
+### Storage
+- Sequential disk append for high throughput
+- Segment logs into files; older segments rolled and compacted or deleted by retention policy
+- Index maps offset → file position for fast reads
+
+### Consumer Groups
+- Each partition assigned to at most one consumer in a group
+- Rebalance on consumer join/leave
+- Exactly-once is hard; at-least-once is the common baseline
+
+### Scale
+- Add brokers to host more partitions
+- Retention and compaction control storage growth
+- Batch produce/fetch requests to improve throughput`,
+    mermaidDiagram: `graph LR
+  Producer --> LB[Broker Endpoint]
+  LB --> Leader[Partition Leader]
+  Leader --> Log[(Append-only Log)]
+  Leader --> F1[Follower Broker 1]
+  Leader --> F2[Follower Broker 2]
+  ConsumerA[Consumer Group A] --> Leader
+  ConsumerB[Consumer Group B] --> Leader
+  Controller[Controller / Metadata Service] -.-> Leader
+  Controller -.-> F1
+  Controller -.-> F2`,
+    asciiDiagram: `TOPIC orders
+
+  Partition 0: Broker A (leader) -> Broker B/C replicas
+  Partition 1: Broker B (leader) -> Broker A/C replicas
+  Partition 2: Broker C (leader) -> Broker A/B replicas
+
+WRITE:
+  Producer -> partition leader -> append log -> replicate -> ack
+
+READ:
+  Consumer group stores offsets
+  Replay = seek to older offset and read again`,
+    studyNotes: `## Alex Xu Vol 2 — Distributed Message Queue
+
+### Core Idea
+- Treat each partition as a durable append-only log
+- Consumers track their own offsets instead of the broker deleting messages after read
+
+### Why Kafka-style Logs Scale
+- Sequential disk writes are fast
+- Zero-copy and batched fetches reduce CPU overhead
+- Partitioning spreads throughput across brokers
+
+### Ordering
+- Global ordering is expensive and usually unnecessary
+- Guarantee ordering only within a partition
+- Use a partition key to keep related events together
+
+### Delivery Semantics
+- At-most-once: fastest, may lose messages
+- At-least-once: retries can duplicate messages
+- Exactly-once: possible but operationally expensive
+
+### Important Trade-offs
+- More partitions increase concurrency but also rebalance cost
+- Stronger durability settings reduce throughput
+- Long retention improves replay/debugging but increases storage cost`,
+  },
+  {
+    title: 'Design a Metrics Monitoring and Alerting System',
+    prompt:
+      'Design a monitoring platform like Prometheus + Alertmanager that collects service metrics, stores time-series data, supports dashboards, and triggers alerts when rules are violated.',
+    difficulty: 'Hard',
+    category: 'Infrastructure',
+    tags: ['timeseries', 'prometheus', 'alerting', 'aggregation', 'pull-model'],
+    modelAnswer: `## Metrics Monitoring and Alerting System
+
+### Requirements
+- Functional: scrape metrics, query time ranges, build dashboards, define alert rules, send notifications
+- Non-functional: low ingestion latency, durable storage, high cardinality control, near-real-time alerts
+
+### Data Model
+- Metric name + labels + timestamp + value
+- Example: http_requests_total{service="api", status="500"} 42 @ ts
+
+### Collection
+- Agents or exporters expose /metrics
+- Collector service scrapes on intervals (15s/30s) or receives pushed metrics for short-lived jobs
+- Batch and compress samples before writing
+
+### Storage
+- In-memory buffer for recent writes
+- Time-series database on disk using WAL + immutable blocks
+- Downsample old data for long-term retention
+
+### Query Layer
+- Query by metric name, labels, time window, aggregation function
+- Common ops: sum, avg, rate, p95, group-by label
+
+### Alerting
+- Rule engine periodically evaluates queries
+- Alert states: pending -> firing -> resolved
+- Deduplicate alerts and group by service/team before sending
+
+### Scale
+- Shard by metric or tenant
+- Use remote write to long-term object storage for history
+- Guard against cardinality explosions from unbounded labels`,
+    mermaidDiagram: `graph LR
+  App[Application / Exporter] --> Scraper[Scraper Service]
+  Scraper --> Ingest[Ingestion Layer]
+  Ingest --> TSDB[(Time-Series DB)]
+  TSDB --> Query[Query API]
+  Query --> Dash[Dashboards]
+  Query --> Rules[Alert Rule Engine]
+  Rules --> Notify[Notification Router]
+  Notify --> Email[Email/Slack/PagerDuty]`,
+    asciiDiagram: `EXPORTERS ──► SCRAPERS ──► INGESTION ──► TSDB
+                                      │
+                                      ├──► Query API ──► Dashboards
+                                      └──► Rule Engine ──► Alert Notifications`,
+    studyNotes: `## Alex Xu — Metrics Monitoring and Alerting
+
+### Core Split
+- Monitoring = collect, store, query metrics
+- Alerting = evaluate rules and notify owners
+
+### Key Challenges
+- High cardinality labels can blow up storage
+- Scrape failures must not silently hide outages
+- Alerts need deduplication and suppression to avoid fatigue
+
+### Design Notes
+- Pull-based scraping is simpler for service discovery and liveness checks
+- Keep recent data hot for fast dashboards; archive older data cheaply
+- Alert rules usually run on short intervals, e.g. every 30s
+- Group alerts by team/service to reduce noisy pages`,
+  },
+  {
+    title: 'Design Ad Click Event Aggregation',
+    prompt:
+      'Design a system that ingests ad impression and click events, aggregates them in near real time, detects fraud, and produces billing/reporting data for advertisers.',
+    difficulty: 'Hard',
+    category: 'Messaging',
+    tags: ['stream-processing', 'kafka', 'aggregation', 'fraud-detection', 'adtech'],
+    modelAnswer: `## Ad Click Event Aggregation
+
+### Requirements
+- Functional: ingest impressions/clicks, aggregate by ad/campaign, near-real-time dashboards, billing-grade counts
+- Non-functional: massive write throughput, exactly-once or idempotent aggregation, low-latency analytics
+
+### Event Pipeline
+- Clients emit impression and click events
+- Events land in Kafka for durable buffering
+- Stream processor validates schema, enriches metadata, and aggregates counters
+
+### Storage
+- Raw immutable events in object storage for audit and replay
+- Real-time aggregates in ClickHouse / Druid
+- Billing tables in a durable OLTP/warehouse system
+
+### Fraud Detection
+- Deduplicate by event_id
+- Detect suspicious click bursts by IP/device/fingerprint
+- Delay final billing until anti-fraud checks complete
+
+### Aggregation Dimensions
+- campaign_id, ad_id, region, device_type, time bucket
+- Compute CTR = clicks / impressions
+
+### Scale
+- Partition by campaign_id or ad_id
+- Use tumbling windows (1 min / 5 min) for real-time stats
+- Late arrivals update prior windows within an allowed lateness period`,
+    mermaidDiagram: `graph LR
+  Client --> Edge[Event Collector]
+  Edge --> Kafka[Kafka]
+  Kafka --> Stream[Stream Processor]
+  Stream --> Fraud[Fraud Detection]
+  Stream --> Agg[(Real-time Aggregates)]
+  Kafka --> Lake[(Raw Event Lake)]
+  Fraud --> Billing[(Billing Store)]
+  Agg --> Dash[Advertiser Dashboard]`,
+    asciiDiagram: `Events ──► Collector ──► Kafka ──► Stream Processing
+                                        │        ├──► Fraud Detection
+                                        │        ├──► Real-time Aggregates
+                                        │        └──► Billing Output
+                                        └──► Raw Event Lake`,
+    studyNotes: `## Alex Xu — Ad Click Event Aggregation
+
+### Interview Focus
+- Separate raw event durability from real-time aggregation
+- Billing data requires stronger correctness than dashboard data
+
+### Important Patterns
+- Immutable event log for replay
+- Windowed aggregation for dashboard freshness
+- Idempotent updates or exactly-once stream processing
+- Fraud filtering before final settlement
+
+### Trade-offs
+- Near-real-time views can tolerate small lag
+- Final billing usually waits for reconciliation and anti-fraud checks`,
+  },
+  {
+    title: 'Design a Hotel Reservation System',
+    prompt:
+      'Design a hotel reservation system that supports room search, availability checks, booking, payment, and cancellation while preventing overbooking across many properties.',
+    difficulty: 'Hard',
+    category: 'Storage',
+    tags: ['inventory', 'booking', 'transactions', 'locking', 'availability'],
+    modelAnswer: `## Hotel Reservation System
+
+### Requirements
+- Functional: search hotels, view room types, reserve room, pay, cancel, refund
+- Non-functional: no overbooking, consistent inventory, good read latency, high availability
+
+### Inventory Model
+- Property -> room_type -> date -> remaining_inventory
+- Availability is tracked per date bucket, not as one global room count
+
+### Booking Flow
+1. Search service returns available room types
+2. User selects room and dates
+3. Reservation service creates a provisional hold with TTL
+4. Payment succeeds -> confirm booking and decrement inventory permanently
+5. Hold expires or payment fails -> release inventory
+
+### Consistency
+- Use DB transactions or compare-and-swap on inventory rows
+- Prevent overbooking with row-level locking on (hotel_id, room_type, date)
+
+### Storage
+- OLTP database for inventory, reservations, payments
+- Search index for hotel metadata and text search
+- Cache hot inventory reads carefully with short TTLs
+
+### Cancellation
+- Refund policy depends on booking conditions
+- On cancel, increment inventory for affected dates if refundable/eligible`,
+    mermaidDiagram: `graph LR
+  User --> Search[Search API]
+  Search --> Catalog[(Hotel Catalog/Search Index)]
+  User --> Reserve[Reservation Service]
+  Reserve --> Inv[(Inventory DB)]
+  Reserve --> Hold[(Hold Store / TTL)]
+  Reserve --> Pay[Payment Service]
+  Pay --> Reserve
+  Reserve --> Booking[(Reservation DB)]`,
+    asciiDiagram: `SEARCH: User -> Search API -> Catalog + Availability
+
+BOOK:
+  User -> Reservation Service
+       -> lock inventory rows by date
+       -> create hold
+       -> take payment
+       -> confirm reservation
+
+CANCEL:
+  Reservation Service -> refund logic -> release inventory`,
+    studyNotes: `## Alex Xu — Hotel Reservation System
+
+### Core Difficulty
+- Reads are easy; writes are hard because availability must stay consistent
+
+### Key Design
+- Track inventory per room type per date
+- Use temporary holds during checkout to avoid races
+- Confirm only after payment succeeds
+
+### Trade-offs
+- Strong consistency on booking path
+- Eventual consistency is acceptable for search index updates
+- Cache availability carefully or you will oversell rooms`,
+  },
+  {
+    title: 'Design a Distributed Email Service',
+    prompt:
+      'Design an email delivery platform like SendGrid or SES that sends transactional and bulk email, tracks delivery status, handles retries, and protects sender reputation.',
+    difficulty: 'Hard',
+    category: 'Messaging',
+    tags: ['smtp', 'queues', 'retry', 'deliverability', 'bulk-email'],
+    modelAnswer: `## Distributed Email Service
+
+### Requirements
+- Functional: send email via API, templates, retries, delivery/bounce tracking, unsubscribe support
+- Non-functional: high throughput, reliable delivery, rate limiting, reputation protection
+
+### Pipeline
+- API accepts send request and validates sender/template
+- Requests go to a durable queue
+- Workers expand templates and hand off to outbound SMTP relays
+- Webhooks ingest bounce, complaint, open, and click events
+
+### Deliverability
+- Warm up IPs gradually
+- Enforce per-domain rate limits (Gmail, Outlook, Yahoo)
+- Use SPF, DKIM, DMARC
+
+### Retry Logic
+- Temporary failures: exponential backoff
+- Permanent failures: mark bounced and suppress future sends
+
+### Storage
+- Metadata DB for message status and templates
+- Event stream for webhooks and analytics
+- Suppression list DB for unsubscribed/complaining recipients
+
+### Multi-Tenancy
+- Isolate customers by API keys and quotas
+- Prevent abusive senders from hurting global sender reputation`,
+    mermaidDiagram: `graph LR
+  Client --> API[Email API]
+  API --> Queue[Durable Queue]
+  Queue --> Worker[Render/Send Workers]
+  Worker --> SMTP[SMTP Relay Pool]
+  SMTP --> Inbox[Recipient Domains]
+  Inbox --> Webhook[Webhook/Event Ingest]
+  Webhook --> Status[(Message Status DB)]
+  Worker --> Status`,
+    asciiDiagram: `Client -> Email API -> Queue -> Send Workers -> SMTP Relays -> Recipient Mail Servers
+                                                |
+                                                └──► Status DB / Analytics / Suppression Lists`,
+    studyNotes: `## Alex Xu — Distributed Email Service
+
+### Main Themes
+- Queue all sends before delivery
+- Separate API acceptance from outbound SMTP throughput
+- Protect sender reputation with throttling and suppression lists
+
+### Operational Needs
+- Retries for transient SMTP failures
+- Bounce/complaint ingestion changes future eligibility
+- Per-tenant quotas prevent abuse`,
+  },
+  {
+    title: 'Design a Real-time Gaming Leaderboard',
+    prompt:
+      'Design a gaming leaderboard that ranks players globally and by region in real time, supports friend views, and updates instantly as scores change.',
+    difficulty: 'Medium',
+    category: 'Real-time',
+    tags: ['leaderboard', 'redis', 'sorted-set', 'ranking', 'top-k'],
+    modelAnswer: `## Real-time Gaming Leaderboard
+
+### Requirements
+- Functional: update scores, top N leaderboard, player rank lookup, nearby ranks, friend leaderboard
+- Non-functional: low latency, high write throughput, real-time updates
+
+### Core Data Structure
+- Redis Sorted Set
+- member = player_id, score = player_score
+
+### Operations
+- Update score: ZADD leaderboard score player_id
+- Get top 100: ZREVRANGE leaderboard 0 99 WITHSCORES
+- Get user rank: ZREVRANK leaderboard player_id
+- Get nearby players: rank-5 to rank+5
+
+### Partitioning
+- Separate leaderboards by season/game mode/region
+- For massive scale, shard by logical leaderboard rather than one global set
+
+### Durability
+- Redis for hot state
+- Periodically snapshot to durable DB / object storage
+- Event log of score updates for replay
+
+### Friend Leaderboard
+- Fetch friend IDs from social graph
+- Intersect with leaderboard ranks or maintain cached friend subsets`,
+    mermaidDiagram: `graph LR
+  GameClient --> API[Score API]
+  API --> Redis[(Redis Sorted Sets)]
+  API --> Log[Score Update Log]
+  Redis --> Query[Leaderboard Query API]
+  Query --> ClientView[Game Client / UI]
+  Query --> Social[Friend Graph]`,
+    asciiDiagram: `Score Update -> API -> Redis Sorted Set
+Top N Query -> Query API -> Redis
+Friend View -> Query API + Friend Graph -> filtered ranks`,
+    studyNotes: `## Alex Xu — Real-time Gaming Leaderboard
+
+### Why Redis Sorted Set
+- Native support for score ordering and rank lookup
+- Excellent for top-N and nearby-rank queries
+
+### Important Considerations
+- Partition leaderboards by season/mode/region
+- Persist snapshots because Redis is not your only source of truth
+- Friend leaderboard usually combines social graph + global leaderboard data`,
+  },
+  {
+    title: 'Design a Payment System',
+    prompt:
+      'Design a payment platform that authorizes, captures, settles, and refunds transactions while integrating with external payment processors and maintaining strong financial correctness.',
+    difficulty: 'Hard',
+    category: 'Infrastructure',
+    tags: ['payments', 'ledger', 'idempotency', 'settlement', 'refunds'],
+    modelAnswer: `## Payment System
+
+### Requirements
+- Functional: authorize payment, capture funds, settle to merchants, refund, dispute support
+- Non-functional: correctness, idempotency, auditability, security, high availability
+
+### Core Services
+- Payment API
+- Idempotency service
+- Ledger
+- Processor integration service
+- Settlement/reconciliation service
+
+### Flow
+1. Client submits payment intent with idempotency key
+2. System validates request and creates payment record
+3. Processor handles card/bank authorization
+4. On success, write immutable ledger entries
+5. Capture and settle later depending on merchant flow
+
+### Ledger
+- Double-entry bookkeeping
+- Every money movement creates balanced debit/credit records
+- Never update balances directly without ledger entries
+
+### Reconciliation
+- Compare internal ledger with processor reports
+- Any mismatch enters manual or automated recovery flow
+
+### Security
+- Tokenize sensitive payment data
+- Minimize PCI scope
+- Strong audit logging and access controls`,
+    mermaidDiagram: `graph LR
+  Client --> API[Payment API]
+  API --> Idem[Idempotency Store]
+  API --> Proc[Processor Gateway]
+  Proc --> External[External Payment Processor]
+  API --> Ledger[(Immutable Ledger)]
+  Ledger --> Recon[Reconciliation Service]
+  Recon --> Reports[Settlement Reports]`,
+    asciiDiagram: `Client -> Payment API -> Processor Gateway -> External Processor
+                 -> Ledger -> Reconciliation -> Settlement`,
+    studyNotes: `## Alex Xu — Payment System
+
+### Core Principles
+- Idempotency is mandatory
+- Ledger is the source of truth
+- Reconciliation catches processor/internal mismatches
+
+### Interview Focus
+- Separate authorization, capture, settlement, refund
+- Use double-entry bookkeeping
+- Never trust external callbacks without verification`,
+  },
+  {
+    title: 'Design a Digital Wallet',
+    prompt:
+      'Design a digital wallet like PayPal or Cash App that stores balances, supports peer-to-peer transfers, top-ups, withdrawals, and transaction history with strong financial consistency.',
+    difficulty: 'Hard',
+    category: 'Infrastructure',
+    tags: ['wallet', 'ledger', 'transfers', 'balances', 'fintech'],
+    modelAnswer: `## Digital Wallet
+
+### Requirements
+- Functional: wallet balance, top-up, withdraw, transfer to another user, transaction history
+- Non-functional: no lost money, no double spend, auditability, low latency
+
+### Core Model
+- Wallet account per user/currency
+- Balance derived from ledger entries, with cached available balance for fast reads
+
+### Transfer Flow
+1. Validate sender has sufficient available balance
+2. Create transfer record with idempotency key
+3. Write double-entry ledger entries: sender debit, receiver credit
+4. Update derived balance cache
+
+### Top-up / Withdrawal
+- Top-up via bank/card payment rails
+- Withdrawal via ACH/bank transfer/card rails
+- External movement reconciled against internal ledger
+
+### Consistency
+- Use transactions on the ledger write path
+- Prevent double spend with account versioning or row locks
+
+### Storage
+- Ledger DB for immutable transactions
+- Profile/account DB
+- Analytics/history store for user timelines`,
+    mermaidDiagram: `graph LR
+  User --> WalletAPI[Wallet API]
+  WalletAPI --> Accounts[(Wallet Accounts)]
+  WalletAPI --> Ledger[(Double-entry Ledger)]
+  WalletAPI --> Rails[Bank/Card Rails]
+  Ledger --> Balance[Derived Balance Cache]
+  WalletAPI --> History[Transaction History]`,
+    asciiDiagram: `P2P Transfer:
+  Sender -> Wallet API -> Ledger debit
+                        -> Ledger credit -> Receiver
+                        -> Balance cache update
+
+Top-up / Withdrawal:
+  Wallet API <-> External payment rails`,
+    studyNotes: `## Alex Xu — Digital Wallet
+
+### Distinction from Payment System
+- Payment system moves money between customer and merchant
+- Wallet system also manages stored user balances and P2P transfers
+
+### Design Notes
+- Ledger first, balance second
+- Double spend prevention is critical
+- External top-up/withdrawal must reconcile with internal wallet state`,
+  },
+  {
+    title: 'Design a Stock Exchange',
+    prompt:
+      'Design a stock exchange that accepts buy and sell orders, matches them with low latency, maintains an order book, and publishes market data while ensuring fairness and correctness.',
+    difficulty: 'Hard',
+    category: 'Real-time',
+    tags: ['matching-engine', 'order-book', 'trading', 'latency', 'market-data'],
+    modelAnswer: `## Stock Exchange
+
+### Requirements
+- Functional: place/cancel order, match trades, maintain order book, publish trades/quotes
+- Non-functional: ultra-low latency, fairness, deterministic matching, high availability
+
+### Order Book
+- Separate buy and sell books per symbol
+- Buy side sorted by highest price first
+- Sell side sorted by lowest price first
+- Within same price level, match FIFO by time
+
+### Matching Engine
+- Single writer per symbol or partition to keep deterministic order
+- On new order: try to match against opposite side, execute trades, then rest remaining quantity
+- Market data published after each book change
+
+### Persistence
+- Write-ahead log for all order events
+- Replay log to rebuild order books after restart
+
+### Market Data
+- Publish top-of-book, depth, and trade events to subscribers
+- Separate trading path from analytics/reporting path
+
+### Risk Controls
+- Pre-trade risk checks on balance/position limits
+- Circuit breakers and symbol halts on extreme volatility
+
+### Scale
+- Partition by symbol
+- Keep matching engine in memory for speed
+- Replicate logs and hot standby nodes for recovery`,
+    mermaidDiagram: `graph LR
+  Trader --> Gateway[Order Gateway]
+  Gateway --> Risk[Risk Checks]
+  Risk --> Match[Matching Engine]
+  Match --> Book[(In-memory Order Book)]
+  Match --> WAL[Write-Ahead Log]
+  Match --> Market[Market Data Feed]
+  WAL --> Replay[Recovery / Replay]`,
+    asciiDiagram: `Order Flow:
+  Trader -> Gateway -> Risk Check -> Matching Engine -> Order Book
+                                               |-> Trade Execution
+                                               |-> Market Data
+                                               |-> WAL`,
+    studyNotes: `## Alex Xu — Stock Exchange
+
+### Interview Focus
+- Matching engine is the core
+- Deterministic ordering matters more than horizontal write scaling per symbol
+
+### Important Rules
+- Price-time priority
+- Single sequenced stream per symbol/book
+- WAL for recovery and auditing
+
+### Architecture Theme
+- Hot path in memory
+- Durable event log underneath
+- Market data fan-out separated from matching path`,
+  },
 ]

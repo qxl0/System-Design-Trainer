@@ -1,13 +1,18 @@
-export type Difficulty = 'Easy' | 'Medium' | 'Hard'
-export type Category =
-  | 'Scalability'
-  | 'Storage'
-  | 'Caching'
-  | 'Messaging'
-  | 'Search'
-  | 'Real-time'
-  | 'Infrastructure'
-  | 'URL/ID'
+export const DIFFICULTIES = ['Easy', 'Medium', 'Hard'] as const
+export type Difficulty = (typeof DIFFICULTIES)[number]
+
+export const QUESTION_CATEGORIES = [
+  'Scalability',
+  'Storage',
+  'Caching',
+  'Messaging',
+  'Search',
+  'Real-time',
+  'Infrastructure',
+  'URL/ID',
+  'Location',
+] as const
+export type Category = (typeof QUESTION_CATEGORIES)[number]
 
 export interface Question {
   id: string

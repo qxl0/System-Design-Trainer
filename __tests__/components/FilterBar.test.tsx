@@ -5,9 +5,14 @@ const defaultProps = {
   difficulty: 'All',
   category: 'All',
   status: 'All',
+  searchQuery: '',
+  selectedTag: 'All',
+  availableTags: ['redis', 'kafka'],
   onDifficultyChange: jest.fn(),
   onCategoryChange: jest.fn(),
   onStatusChange: jest.fn(),
+  onSearchQueryChange: jest.fn(),
+  onSelectedTagChange: jest.fn(),
 }
 
 describe('FilterBar', () => {
@@ -30,5 +35,10 @@ describe('FilterBar', () => {
     render(<FilterBar {...defaultProps} difficulty="Easy" />)
     const easyBtn = screen.getByText('Easy')
     expect(easyBtn.closest('button')).toHaveClass('ring-2')
+  })
+
+  it('includes all configured categories', () => {
+    render(<FilterBar {...defaultProps} />)
+    expect(screen.getByRole('option', { name: 'Location' })).toBeInTheDocument()
   })
 })

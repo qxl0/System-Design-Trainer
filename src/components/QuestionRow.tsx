@@ -38,7 +38,18 @@ export function QuestionRow({ question }: { question: QuestionWithStatus }) {
         >
           {question.title}
         </Link>
-        <div className="text-xs text-gray-500 mt-0.5">{question.category}</div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-gray-500">{question.category}</span>
+          {question.tags.slice(0, 3).map((tag) => (
+            <span
+              key={tag}
+              className="rounded-full border border-gray-700 bg-gray-900 px-2 py-0.5 text-gray-400"
+            >
+              #{tag}
+            </span>
+          ))}
+        </div>
+        <p className="mt-2 max-w-2xl text-sm text-gray-400">{question.prompt}</p>
       </td>
       <td className="py-3 px-4 text-right">
         <StatusBadge question={question} />
