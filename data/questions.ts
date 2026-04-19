@@ -3066,4 +3066,354 @@ Top-up / Withdrawal:
 - Durable event log underneath
 - Market data fan-out separated from matching path`,
   },
+  {
+    title: 'Design a Web Crawler',
+    prompt:
+      'Design a web crawler that discovers and downloads pages from the public web, respects robots.txt and rate limits, avoids duplicates, and keeps a search index fresh.',
+    difficulty: 'Hard',
+    category: 'Search',
+    tags: ['crawler', 'robots.txt', 'deduplication', 'frontier', 'indexing'],
+    modelAnswer: `## Web Crawler
+
+### Requirements
+- Functional: seed URLs, fetch pages, extract links, deduplicate URLs/content, honor robots.txt, refresh pages periodically
+- Non-functional: internet-scale throughput, politeness, fault tolerance, freshness, storage efficiency
+
+### High-Level Flow
+1. Seed service adds initial URLs into the crawl frontier
+2. URL scheduler picks the next URL based on priority and host politeness rules
+3. Fetchers download pages and record HTTP metadata
+4. Parsers extract text, metadata, canonical URLs, and outlinks
+5. Dedup services remove duplicate URLs and near-identical content
+6. Indexer sends parsed content into the search index
+
+### Core Components
+- Frontier queue: distributed priority queue keyed by URL
+- Host scheduler: enforces per-domain concurrency and crawl delay
+- Robots service: caches robots.txt and allow/deny rules per host
+- URL seen set: Bloom filter or hash set to avoid revisiting the same URL too often
+- Content dedup store: hash page content (for example SimHash for near duplicates)
+
+### Storage
+- Raw page store in object storage
+- Metadata DB for crawl status, last fetch time, HTTP code, checksum
+- Search index stores normalized text, title, links, and ranking signals
+
+### Important Trade-offs
+- Freshness vs bandwidth: popular pages re-crawled more often
+- Breadth-first crawling discovers sites quickly; priority crawling improves search quality
+- Bloom filters are memory-efficient but allow false positives` ,
+    mermaidDiagram: `graph LR
+  Seed[Seed URLs] --> Frontier[URL Frontier / Priority Queue]
+  Frontier --> Scheduler[Host Scheduler]
+  Scheduler --> Robots[Robots.txt Cache]
+  Scheduler --> Fetcher[Fetcher Workers]
+  Fetcher --> Parser[HTML Parser]
+  Parser --> Dedup[URL + Content Dedup]
+  Dedup --> Indexer[Indexer]
+  Parser --> Frontier
+  Indexer --> Search[(Search Index)]
+  Fetcher --> Raw[(Raw Page Store)]`,
+    asciiDiagram: `SEEDS -> FRONTIER -> HOST SCHEDULER -> FETCHERS -> PARSER
+                                             |              |
+                                             |              +-> Raw page store
+                                             +-> robots.txt cache
+
+PARSER -> URL dedup -> frontier
+PARSER -> content dedup -> indexer -> search index`,
+    studyNotes: `## Primer-style notes - Web Crawler
+
+### Main Interview Themes
+- The crawler is usually separate from the search serving path
+- Politeness matters: respect robots.txt, crawl-delay, and per-host rate limits
+- Deduplication happens twice:
+  - URL-level dedup to avoid fetching the same URL repeatedly
+  - Content-level dedup to avoid indexing mirrored pages
+
+### Freshness Strategy
+- Highly popular news pages get recrawled frequently
+- Low-value or stale pages get a long recrawl interval
+- Store last fetched time and change frequency hints per URL
+
+### Scale Strategy
+- Partition frontier by host or URL hash
+- Keep per-host queues so one large domain does not starve others
+- Use object storage for raw HTML and a separate inverted index for search` ,
+  },
+  {
+    title: 'Design a Personal Finance Tracker',
+    prompt:
+      'Design a system like Mint that aggregates accounts from multiple banks, imports transactions, categorizes spending, tracks budgets, and alerts users about unusual activity.',
+    difficulty: 'Hard',
+    category: 'Infrastructure',
+    tags: ['aggregation', 'webhooks', 'ledger', 'banking', 'budgets'],
+    modelAnswer: `## Personal Finance Tracker
+
+### Requirements
+- Functional: link bank accounts, import balances and transactions, categorize spend, budget tracking, alerts
+- Non-functional: strong security, eventual consistency with external institutions, auditability, good UX on stale data
+
+### Data Ingestion
+- Use an aggregator or direct bank integrations to connect accounts
+- Pull periodic syncs and ingest webhook updates when institutions support them
+- Every imported transaction is stored as immutable raw financial data
+
+### Core Services
+- Account-linking service for OAuth/token exchange with banks
+- Sync service to pull balances and new transactions
+- Categorization service to label merchants and spending categories
+- Budget service to compute monthly totals and limit breaches
+- Alerting service for low balance, large purchase, duplicate charge, or unusual merchant
+
+### Storage
+- User/account metadata in OLTP DB
+- Immutable transaction store for imported financial events
+- Derived materialized views for monthly spending and budgets
+
+### Correctness
+- External bank feeds are not perfectly real-time
+- Transactions can start as pending and later settle with different amounts
+- De-duplicate by institution transaction ID plus fallback heuristics
+
+### Security
+- Encrypt tokens at rest
+- Minimize stored secrets and sensitive fields
+- Strong audit logs and scoped access controls` ,
+    mermaidDiagram: `graph LR
+  User --> Link[Account Linking Service]
+  Link --> Bank[Bank Aggregator / Bank APIs]
+  Bank --> Sync[Sync + Webhook Ingest]
+  Sync --> Tx[(Transaction Store)]
+  Sync --> Accounts[(Account Metadata DB)]
+  Tx --> Categorize[Categorization Service]
+  Categorize --> Budget[Budget / Insights Service]
+  Budget --> Alerts[Alerting]
+  Budget --> UI[User Dashboard]`,
+    asciiDiagram: `User -> Account Linking -> Bank APIs/Aggregator
+                               |
+                               v
+                       Sync + Webhook Ingest
+                          |             |
+                          v             v
+                  Account Metadata   Transaction Store
+                                        |
+                                        v
+                            Categorization / Budgeting / Alerts`,
+    studyNotes: `## Primer-style notes - Personal Finance Tracker
+
+### Core Difficulty
+- Your system does not control the source of truth for balances; banks do
+- Imported data is delayed, corrected, and sometimes duplicated
+
+### Design Principles
+- Keep raw transactions immutable
+- Build categorized and budgeted views as derived data
+- Show "last synced" clearly to users because consistency is external
+
+### Good Interview Points
+- Pending vs posted transactions
+- Handling revoked bank tokens and expired credentials
+- Budget alerts should be asynchronous, not block account sync` ,
+  },
+  {
+    title: 'Design a Social Graph Service',
+    prompt:
+      'Design the data structures and APIs for a social graph that stores follow and friend relationships, supports mutual connections, follower counts, friend suggestions, and celebrity-scale fan-out.',
+    difficulty: 'Hard',
+    category: 'Scalability',
+    tags: ['graph', 'followers', 'friends', 'adjacency-list', 'fanout'],
+    modelAnswer: `## Social Graph Service
+
+### Requirements
+- Functional: follow/unfollow, friend connect, list followers/following, mutual friends, follower counts, recommendations
+- Non-functional: low-latency reads, large celebrity accounts, high write volume during spikes
+
+### Data Model
+- Directed edges for follows: user_a -> user_b
+- Optional undirected friendship represented as two confirmed directed edges or one relation record
+- Store adjacency lists rather than doing deep graph traversals in OLTP
+
+### APIs
+- POST /follow
+- DELETE /follow
+- GET /users/{id}/followers
+- GET /users/{id}/following
+- GET /users/{id}/mutuals?with=other_user
+
+### Storage
+- Edge store partitioned by source user ID
+- Counter cache for follower and following counts
+- Recommendation pipeline computed asynchronously from graph signals
+
+### Scale Concerns
+- Celebrities have millions of inbound edges; shard large adjacency lists
+- Cursor pagination is mandatory for followers/following lists
+- Use separate online serving path and offline batch path for "people you may know"
+
+### Trade-offs
+- Graph databases are expressive but not always required for simple follow lists
+- For interview scope, adjacency lists in MySQL/Cassandra plus caches are usually enough` ,
+    mermaidDiagram: `graph LR
+  User --> API[Social Graph API]
+  API --> Edge[(Edge Store)]
+  API --> Count[(Counter Cache)]
+  Edge --> Mutual[Mutual / Query Service]
+  Edge --> Reco[Recommendation Pipeline]
+  Reco --> Suggest[(Suggestion Store)]
+  Mutual --> Client[Client]
+  Suggest --> Client`,
+    asciiDiagram: `WRITE:
+  User -> Social Graph API -> Edge Store
+                           -> Counter Cache
+
+READ:
+  Followers/Following -> Edge Store + Cache
+  Mutuals -> Query Service over adjacency lists
+  Suggestions -> Offline pipeline -> Suggestion Store`,
+    studyNotes: `## Primer-style notes - Social Graph
+
+### Recommended framing
+- Separate graph storage from feed generation; they are different systems
+- Optimize for adjacency list lookups, not arbitrary graph analytics in the hot path
+
+### Common Patterns
+- Partition edges by user ID
+- Precompute counts instead of counting huge edge sets on every request
+- Suggestions use offline jobs: mutual counts, imported contacts, shared school/company, engagement signals
+
+### Interview Trade-offs
+- Simple follow APIs: relational or wide-column store works well
+- Rich multi-hop graph exploration: graph DB may help, but often not needed for the core product path` ,
+  },
+  {
+    title: 'Design a Search Query Cache',
+    prompt:
+      'Design a query cache for a search engine that stores the results of popular queries, reduces load on ranking servers, and handles invalidation when the index changes.',
+    difficulty: 'Medium',
+    category: 'Caching',
+    tags: ['query-cache', 'redis', 'ranking', 'ttl', 'invalidation'],
+    modelAnswer: `## Search Query Cache
+
+### Requirements
+- Functional: cache popular query results, low-latency lookup, invalidate stale entries, support pagination
+- Non-functional: high hit rate, memory efficiency, predictable freshness
+
+### Cache Key
+- Normalize the query text
+- Include language, region, safe-search mode, device type, and page number in the key
+- Example: q=best+pizza|lang=en|geo=nyc|page=1
+
+### Read Path
+1. User query hits search frontend
+2. Frontend checks cache for ranked document IDs
+3. On hit: fetch snippets/doc metadata and return
+4. On miss: ranking stack computes results, store top N doc IDs in cache
+
+### Write / Invalidation
+- TTL handles most churn for tail queries
+- Index version or generation number can be part of the key for cheap global invalidation
+- Very hot queries can be proactively refreshed
+
+### Data Stored
+- Ranked document IDs and lightweight scoring metadata
+- Do not store entire documents in the query cache
+
+### Trade-offs
+- Larger cache improves hit rate but costs memory
+- Short TTL improves freshness but lowers hit ratio
+- Query normalization is critical to avoid duplicate cache entries` ,
+    mermaidDiagram: `graph LR
+  User --> Frontend[Search Frontend]
+  Frontend --> Cache[(Query Cache)]
+  Cache -->|miss| Rank[Ranking Service]
+  Rank --> Index[(Search Index)]
+  Rank --> Cache
+  Frontend --> Snippets[Document Metadata/Snippet Service]
+  Snippets --> User`,
+    asciiDiagram: `User -> Search Frontend -> Query Cache
+                              | hit
+                              v
+                         Return ranked doc IDs
+
+Miss -> Ranking Service -> Search Index -> Cache populate -> Response`,
+    studyNotes: `## Primer-style notes - Search Query Cache
+
+### Why cache query results
+- Search traffic is highly skewed; a small set of hot queries drives a large portion of reads
+- Caching top result IDs saves expensive ranking work
+
+### Good design details
+- Normalize whitespace, casing, locale, and filters before key generation
+- Include index generation in the key when global reindexing is common
+- Cache only the top K ranked document IDs, not full rendered pages
+
+### Failure mode to discuss
+- A stale cache can serve outdated results after major reindexing
+- A key design bug can mix results across languages or regions` ,
+  },
+  {
+    title: 'Design Amazon Sales Ranking by Category',
+    prompt:
+      'Design a system that continuously computes best-seller rankings by category for an e-commerce site, updates quickly after purchases, and serves ranking pages with low latency.',
+    difficulty: 'Medium',
+    category: 'Real-time',
+    tags: ['ranking', 'stream-processing', 'top-k', 'ecommerce', 'aggregation'],
+    modelAnswer: `## Sales Ranking by Category
+
+### Requirements
+- Functional: update category rankings after purchases, support top-N lists, handle many categories, show near-real-time leaderboards
+- Non-functional: low-latency reads, high write throughput, eventual consistency acceptable within a short window
+
+### Event Flow
+- Orders emit purchase events after payment confirmation
+- Stream processor aggregates counts by category and product
+- Ranking store keeps top K products per category
+
+### Core Model
+- Product can belong to multiple categories
+- For each category, maintain a sorted ranking by weighted sales score
+- Score can be simple unit count or a time-decayed metric to reflect recent trends
+
+### Storage
+- Raw order events in event log / object storage
+- Aggregation state in stream processor state store
+- Serving store in Redis sorted sets or a low-latency key-value store
+
+### Read Path
+- Category page reads precomputed top N product IDs
+- Fetch product metadata and inventory from product services
+
+### Trade-offs
+- Batch updates are simpler but less fresh
+- Streaming updates are fresher but operationally more complex
+- Ranking on revenue vs unit count changes incentives and behavior` ,
+    mermaidDiagram: `graph LR
+  Checkout[Checkout / Order Service] --> Events[Purchase Events]
+  Events --> Stream[Stream Aggregator]
+  Stream --> Rank[(Category Ranking Store)]
+  Stream --> Lake[(Raw Event Lake)]
+  Rank --> CategoryAPI[Category Page API]
+  CategoryAPI --> Catalog[Product Catalog]
+  CategoryAPI --> User[User]`,
+    asciiDiagram: `Orders -> Purchase Events -> Stream Aggregation -> Ranking Store
+                                               |
+                                               +-> Raw event lake
+
+Category page -> Ranking Store -> Product Catalog -> Response`,
+    studyNotes: `## Primer-style notes - Sales Ranking
+
+### Main idea
+- Never compute top sellers by scanning all orders on page load
+- Precompute rankings continuously and serve from a hot store
+
+### Good interview details
+- Use payment-confirmed order events, not cart adds
+- Returns and cancellations should emit compensating events
+- Time-decayed scores are often more useful than all-time counts
+
+### Scaling pattern
+- Partition aggregation by category
+- Keep only top K items per category in the serving layer
+- Store raw immutable events so rankings can be recomputed if logic changes` ,
+  },
 ]

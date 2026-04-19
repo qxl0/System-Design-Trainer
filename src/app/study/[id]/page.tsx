@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import type { Question } from '@/types'
 import MarkdownContent from '@/components/MarkdownContent'
+import { getReferencesForQuestionTitle } from '@/lib/references'
 
 const MermaidDiagram = dynamic(() => import('@/components/MermaidDiagram'), { ssr: false })
 
@@ -44,6 +45,8 @@ export default function StudyPage() {
       </main>
     )
   }
+
+  const recommendedReferences = getReferencesForQuestionTitle(question.title)
 
   return (
     <main className="max-w-3xl mx-auto px-4 py-8 space-y-6">
@@ -107,6 +110,39 @@ export default function StudyPage() {
             📖 Study Notes — Alex Xu
           </h2>
           <MarkdownContent content={question.studyNotes} className="space-y-4" />
+        </div>
+      )}
+
+      {recommendedReferences.length > 0 && (
+        <div className="bg-gray-900 rounded-xl border border-gray-700 p-5">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+              Recommended Reading
+            </h2>
+            <Link
+              href={`/references?q=${encodeURIComponent(question.title)}`}
+              className="text-xs text-blue-300 hover:underline"
+            >
+              Open in References
+            </Link>
+          </div>
+          <div className="space-y-3">
+            {recommendedReferences.map((ref) => (
+              <div key={ref.id} className="rounded-lg border border-gray-800 bg-gray-950/70 p-4">
+                <div className="mb-1 text-sm font-medium text-gray-100">
+                  <a
+                    href={ref.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-300 hover:text-blue-200 hover:underline"
+                  >
+                    {ref.title}
+                  </a>
+                </div>
+                <p className="text-sm leading-6 text-gray-400">{ref.note}</p>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

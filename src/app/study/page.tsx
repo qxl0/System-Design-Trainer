@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import type { QuestionWithStatus } from '@/types'
 
 const difficultyColors = {
@@ -11,8 +12,11 @@ const difficultyColors = {
 }
 
 export default function StudyListPage() {
+  const searchParams = useSearchParams()
+  const initialQuery = searchParams.get('q') ?? ''
   const [questions, setQuestions] = useState<QuestionWithStatus[]>([])
   const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState(initialQuery)
 
   useEffect(() => {
     fetch('/api/questions')
@@ -23,9 +27,21 @@ export default function StudyListPage() {
       })
   }, [])
 
+  useEffect(() => {
+    setQuery(initialQuery)
+  }, [initialQuery])
+
   if (loading) return <div className="text-gray-400 p-8 text-center">Loading...</div>
 
-  const byCategory = questions.reduce<Record<string, QuestionWithStatus[]>>((acc, q) => {
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredQuestions = questions.filter((q) => {
+    if (!normalizedQuery) return true
+    return [q.title, q.prompt, q.category, ...q.tags].some((value) =>
+      value.toLowerCase().includes(normalizedQuery)
+    )
+  })
+
+  const byCategory = filteredQuestions.reduce<Record<string, QuestionWithStatus[]>>((acc, q) => {
     if (!acc[q.category]) acc[q.category] = []
     acc[q.category].push(q)
     return acc
@@ -38,6 +54,18 @@ export default function StudyListPage() {
         <p className="text-gray-400 text-sm mt-1">
           Deep dives into each system design — architecture diagrams, key trade-offs, and notes from Alex Xu&apos;s System Design Interview Vol 1 &amp; 2.
         </p>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search study questions..."
+          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-3 text-sm text-gray-100 outline-none transition-colors placeholder:text-gray-500 focus:border-blue-500"
+        />
+        <div className="mt-3 text-xs text-gray-500">
+          Showing {filteredQuestions.length} of {questions.length} questions
+        </div>
       </div>
 
       {Object.entries(byCategory).map(([category, qs]) => (
@@ -63,6 +91,12 @@ export default function StudyListPage() {
           </div>
         </div>
       ))}
+
+      {filteredQuestions.length === 0 && (
+        <div className="rounded-xl border border-gray-800 bg-gray-900 p-8 text-center text-sm text-gray-400">
+          No study questions match your search.
+        </div>
+      )}
     </main>
   )
 }

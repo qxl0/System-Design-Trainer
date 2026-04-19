@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import Link from 'next/link'
 import { FilterBar } from '@/components/FilterBar'
 import { QuestionRow } from '@/components/QuestionRow'
 import { QUESTION_CATEGORIES } from '@/types'
@@ -25,7 +26,7 @@ export default function HomePage() {
       })
   }, [])
 
-  const availableTags = [...new Set(questions.flatMap((q) => q.tags))].sort((a, b) =>
+  const availableTags = Array.from(new Set(questions.flatMap((q) => q.tags))).sort((a, b) =>
     a.localeCompare(b)
   )
 
@@ -77,11 +78,19 @@ export default function HomePage() {
             {questions.length} questions across {categoryCounts.length} categories
           </p>
         </div>
-        {dueCount > 0 && (
-          <span className="bg-red-900 text-red-300 px-3 py-1 rounded-full text-sm font-medium">
-            📅 {dueCount} due for review
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          <Link
+            href="/references"
+            className="rounded-full border border-gray-700 bg-gray-900 px-3 py-1 text-sm font-medium text-gray-300 transition-colors hover:border-blue-500 hover:text-blue-300"
+          >
+            Appendix & references
+          </Link>
+          {dueCount > 0 && (
+            <span className="bg-red-900 text-red-300 px-3 py-1 rounded-full text-sm font-medium">
+              📅 {dueCount} due for review
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="mb-4 flex flex-wrap gap-2">
@@ -134,7 +143,7 @@ export default function HomePage() {
         <div className="mb-6">
           <p className="mb-2 text-xs uppercase tracking-[0.2em] text-gray-500">Popular tags</p>
           <div className="flex flex-wrap gap-2">
-            {[...new Set(searchedAndScoped.flatMap((q) => q.tags))]
+            {Array.from(new Set(searchedAndScoped.flatMap((q) => q.tags)))
               .sort((a, b) => a.localeCompare(b))
               .slice(0, 12)
               .map((tag) => (
