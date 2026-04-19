@@ -43,6 +43,14 @@ export function QuestionRow({ question }: { question: QuestionWithStatus }) {
       <td className="py-3 px-4 text-right">
         <StatusBadge question={question} />
       </td>
+      <td className="py-3 px-4 text-right">
+        <Link
+          href={`/study/${question.id}`}
+          className="text-xs px-2 py-0.5 bg-indigo-900 text-indigo-300 rounded hover:bg-indigo-800 transition-colors"
+        >
+          Study
+        </Link>
+      </td>
     </tr>
   )
 }

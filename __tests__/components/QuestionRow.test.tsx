@@ -35,4 +35,10 @@ describe('QuestionRow', () => {
     const dot = screen.getByTestId('difficulty-dot')
     expect(dot).toHaveClass('text-yellow-400')
   })
+
+  it('renders Study link with correct href', () => {
+    render(<table><tbody><QuestionRow question={q} /></tbody></table>)
+    const studyLink = screen.getByRole('link', { name: 'Study' })
+    expect(studyLink).toHaveAttribute('href', `/study/${q.id}`)
+  })
 })

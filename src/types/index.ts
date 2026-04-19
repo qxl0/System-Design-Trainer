@@ -18,6 +18,9 @@ export interface Question {
   tags: string[]
   modelAnswer: string
   createdAt: string
+  mermaidDiagram?: string
+  asciiDiagram?: string
+  studyNotes?: string
 }
 
 export interface Session {

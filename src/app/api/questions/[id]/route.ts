@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { findSeedByTitle } from '@/lib/question-seed-lookup'
 
 export async function GET(
   _request: NextRequest,
@@ -15,6 +16,8 @@ export async function GET(
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 
+  const seed = findSeedByTitle(question.title)
+
   return NextResponse.json({
     id: question.id,
     title: question.title,
@@ -24,6 +27,9 @@ export async function GET(
     tags: JSON.parse(question.tags) as string[],
     modelAnswer: question.modelAnswer,
     createdAt: question.createdAt.toISOString(),
+    mermaidDiagram: seed?.mermaidDiagram,
+    asciiDiagram: seed?.asciiDiagram,
+    studyNotes: seed?.studyNotes,
     progress: question.progress
       ? {
           id: question.progress.id,

@@ -23,6 +23,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/" className="text-gray-400 hover:text-gray-100 transition-colors">
                 Practice
               </Link>
+              <Link href="/study" className="text-gray-400 hover:text-gray-100 transition-colors">
+                Study
+              </Link>
               <Link href="/progress" className="text-gray-400 hover:text-gray-100 transition-colors">
                 Progress
               </Link>
