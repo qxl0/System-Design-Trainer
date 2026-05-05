@@ -95,7 +95,7 @@ function renderTable(tableLines: string[], key: string) {
   )
 }
 
-function RenderedMarkdown({ content, className }: { content: string; className?: string }) {
+export function RenderedMarkdown({ content, className }: { content: string; className?: string }) {
   const lines = content.replace(/\r\n/g, '\n').split('\n')
   const nodes: ReactNode[] = []
   let index = 0

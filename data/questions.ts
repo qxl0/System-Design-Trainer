@@ -187,106 +187,210 @@ Capacity: 41 bits → 69 years | 10 bits → 1024 nodes | 12 bits → 4096/ms/no
   {
     title: 'Design Twitter Feed',
     prompt:
-      'Design the Twitter home feed — when a user opens Twitter, they see a ranked list of tweets from accounts they follow. The system must handle celebrity accounts (millions of followers) and deliver feeds in under 200ms.',
+      'Design the Twitter home feed — when a user opens Twitter, they see a paginated timeline of tweets from accounts they follow. The system must handle celebrity accounts with millions of followers and serve feeds under 200ms at 300M DAU.',
     difficulty: 'Hard',
     category: 'Scalability',
-    tags: ['fanout', 'redis', 'kafka', 'cdn', 'ranking'],
-    modelAnswer: `## Twitter Feed Design
+    tags: ['fanout', 'redis', 'kafka', 'cassandra', 'social-graph', 'ranking'],
+    modelAnswer: `## Design Twitter Feed
 
 ### Requirements
-- Home timeline: tweets from followed accounts, reverse-chronological + ranked
-- 300M DAU, 500M tweets/day
-- Read latency < 200ms
 
-### Fan-out Approaches
+**Functional**
+- Users can post tweets (text ≤ 280 chars, optional images/video)
+- Users can follow / unfollow other users
+- Users see a home feed: paginated list of tweets from accounts they follow
+- Feed is roughly reverse-chronological (with optional algorithmic ranking)
 
-**Fan-out on Write (push model)**
-- On tweet: write to every follower's feed cache (Redis sorted set)
-- Read: O(1) — just read from cache
-- Problem: celebrity with 10M followers = 10M writes per tweet
+**Non-Functional**
+- 300M DAU; 500M tweets/day (~5,800 writes/sec; ~500K feed reads/sec)
+- Feed load latency < 200ms p99
+- Eventual consistency acceptable — up to 30s staleness is fine
+- High availability (99.99%); fan-out failures must not block tweet creation
 
-**Fan-out on Read (pull model)**
-- On read: fetch tweets from all followed accounts, merge, rank
-- Problem: O(following_count) reads per page load
+### Core Entities
 
-**Hybrid (Twitter's actual approach)**
-- Normal users (<10K followers): fan-out on write
-- Celebrities: fan-out on read (fetched and merged at read time)
-- Threshold: configurable per account
+| Entity | Key Fields |
+|--------|-----------|
+| User | id, username, follower_count, is_celebrity |
+| Tweet | id, author_id, body, media_urls[], created_at |
+| Follow | follower_id, followee_id, created_at |
 
-### Storage
-- Tweets: Cassandra (write-heavy, time-series, append-only)
-- Feed cache: Redis sorted set (score = timestamp, value = tweet_id)
-- User graph: MySQL (follower/following relationships)
+### API Design
 
-### Ranking
-- Fetch top-N from cache → apply ML ranking → return page
-- Ranking considers: recency, engagement, relationship strength
+\`\`\`
+POST   /v1/tweets
+       body: { body, media_urls[] }
+       → { tweet_id, created_at }
 
-### Media
-- Images/video: S3 + CloudFront CDN
-- Tweet contains media_url, not binary`,
-    mermaidDiagram: `graph LR
-  Writer[Writer User] -->|POST /tweet| API[API Server]
-  API --> TweetDB[(Cassandra\\nTweets)]
-  API --> Kafka[Kafka\\ntweet.published]
-  Kafka --> FanOut[Fanout Worker]
-  FanOut -->|check| Graph[Social Graph\\nMySQL]
-  FanOut -->|push: normal users| FeedCache[(Redis\\nSorted Set per user)]
-  FanOut -->|skip celebrities| FeedCache
-  Reader[Reader User] -->|GET /feed| FeedAPI[Feed API]
-  FeedAPI -->|read pre-built feed| FeedCache
-  FeedAPI -->|merge celebrity tweets at read| TweetDB`,
-    asciiDiagram: `WRITE PATH:
-  Writer ──► API ──► Cassandra (tweet store)
-                └──► Kafka ──► Fanout Worker
-                                    │
-                              Social Graph (MySQL)
-                              ├── normal user (<10K followers):
-                              │   push tweet_id to each follower's Redis sorted set
-                              └── celebrity (>10K followers):
-                                  skip fanout (pull at read time)
+POST   /v1/users/{id}/follow    → 200 OK
+DELETE /v1/users/{id}/follow    → 200 OK
 
-READ PATH:
-  Reader ──► Feed API
-                ├──► Redis (sorted set by score=timestamp) ← pre-built feed
-                └──► Cassandra (fetch celebrity tweets on demand)
-                        │
-                  Merge + ML rank ──► Response`,
-    studyNotes: `## Alex Xu Vol 1, Chapter 11 — News Feed System
+GET    /v1/feed?limit=20&cursor={tweet_id}
+       → { tweets: [Tweet], next_cursor }
+\`\`\`
 
-### Fan-out Strategies
+Cursor is a tweet_id (not a page number) — stable under insertions and avoids offset scans.
 
-**Fan-out on Write (Push)**
-- When tweet posted: write tweet_id to every follower's feed cache
-- Read: O(1) — just ZRANGE from Redis sorted set
-- Problem: celebrity with 10M followers = 10M Redis writes per tweet
+### High-Level Design
 
-**Fan-out on Read (Pull)**
-- When user opens feed: fetch from all N accounts they follow, merge, sort
-- Problem: O(following_count) reads = slow for heavy followers
+**Write path — posting a tweet**
+1. Client → API Gateway → Tweet Service
+2. Tweet Service writes tweet to Cassandra (tweet store)
+3. Tweet Service publishes \`tweet.created\` event to Kafka (fire-and-forget; does not block response)
+4. Fan-out Workers consume the event, look up the author's follower list from the Social Graph DB
+5. For each follower: append tweet_id to their Redis feed sorted set (score = created_at timestamp)
 
-**Hybrid (Twitter's actual approach)**
-- Regular users (<10K followers): fan-out on write
-- Celebrities: excluded from fanout; merged at read time from DB
-- Threshold is configurable per account
+**Read path — loading the home feed**
+1. Client → Feed Service
+2. Feed Service does \`ZREVRANGE feed:{user_id} 0 19\` on Redis → get top 20 tweet_ids
+3. For each user the client follows who is a celebrity, fetch their N most recent tweets from Cassandra and inject into the result set
+4. Merge, sort by timestamp, apply optional ML ranking
+5. Hydrate tweet_ids → full Tweet objects (batch fetch from Tweet Service / cache)
+6. Return page + next_cursor
 
-### Feed Cache (Redis)
-- Sorted set key: feed:{user_id}
-- Score: tweet timestamp (Unix ms)
-- Value: tweet_id
-- Max size: 800 entries per user (older trimmed)
+### Deep Dive 1 — Fan-out Problem (Celebrity Accounts)
 
-### Data Storage
-- Tweets: Cassandra (time-series, write-heavy, no joins needed)
-- Social graph: MySQL (user_id, follower_id, created_at)
-- Feed cache: Redis (ephemeral, reconstructible)
-- Media: S3 + CloudFront CDN
+**The problem:** a celebrity with 50M followers triggers 50M Redis writes per tweet — unsustainable.
 
-### Ranking
-- Fetch top 500 from cache
-- Apply ML ranking model (recency + engagement + relationship strength)
-- Return top 20 to client`,
+**Fan-out on Write (push)**
+- Pros: O(1) reads — just ZREVRANGE a pre-built cache
+- Cons: 50M writes per celebrity tweet; backlog builds during spikes
+
+**Fan-out on Read (pull)**
+- Pros: no write amplification
+- Cons: user following 500 accounts = 500 DB reads merged at request time → too slow
+
+**Hybrid approach (Twitter's production model)**
+- Regular users (< 10K followers): fan-out on write — push tweet_id to all follower caches immediately
+- Celebrities (≥ 10K followers): skip fan-out; at read time, fetch their latest tweets directly from Cassandra and merge with the pre-built feed
+- Threshold is a runtime config flag per account; easily adjusted
+
+**Why 10K?** Below that, write amplification is cheap. Above it, the cost of 10K+ Redis writes per tweet exceeds the marginal cost of a few extra Cassandra reads at read time.
+
+### Deep Dive 2 — Feed Cache Design (Redis)
+
+\`\`\`
+Key:   feed:{user_id}          → Sorted Set
+Score: Unix timestamp (ms)     → ordering
+Value: tweet_id                → pointer only, not full content
+\`\`\`
+
+- Max 800 entries per user; on every fan-out write, trim to 800 with ZREMRANGEBYRANK
+- Inactive users (no login in 30d): evict from Redis; reconstruct on next login by scanning Cassandra
+- Tweet content is NOT stored in Redis — a separate tweet cache (Redis hash or Memcached) holds hydrated Tweet objects keyed by tweet_id
+
+### Deep Dive 3 — Storage Choices
+
+| Data | Store | Why |
+|------|-------|-----|
+| Tweets | Cassandra | Write-heavy, time-series, no joins, scales horizontally |
+| Social graph | MySQL | Relational; follower/followee queries need indexed lookups |
+| Feed cache | Redis Sorted Set | O(log N) insert, O(1) range read |
+| Tweet content cache | Redis Hash / Memcached | Key-value hydration at read time |
+| Media (images, video) | S3 + CloudFront CDN | Large blobs; serve from edge |
+
+Cassandra partition key = author_id; clustering key = created_at DESC — gives fast "latest N tweets by user" scans needed for celebrity merge.
+
+### Deep Dive 4 — Feed Ranking
+
+1. Fetch top 500 tweet_ids from Redis (more than we'll return)
+2. Hydrate to full Tweet objects
+3. Apply ML ranking model: inputs are recency, engagement rate, relationship strength (reply/like history with this author), author account health score
+4. Return top 20 with next_cursor pointing to the lowest-ranked tweet_id returned`,
+    mermaidDiagram: `graph TB
+  subgraph Write Path
+    W[Writer] -->|POST /tweets| AG[API Gateway]
+    AG --> TS[Tweet Service]
+    TS --> Cass[(Cassandra\\nTweets)]
+    TS -->|tweet.created| Kafka[Kafka]
+    Kafka --> FW[Fan-out Workers]
+    FW -->|follower list| SG[(Social Graph\\nMySQL)]
+    FW -->|regular users\\nZADD feed:uid score=ts| RC[(Redis\\nFeed Caches)]
+    FW -->|celebrities\\nskip fanout| RC
+  end
+  subgraph Read Path
+    R[Reader] -->|GET /feed| FS[Feed Service]
+    FS -->|ZREVRANGE feed:uid| RC
+    FS -->|celebrity tweets\\nlatest N| Cass
+    FS -->|merge + rank| FS
+    FS -->|batch hydrate tweet_ids| TC[(Redis\\nTweet Cache)]
+    FS --> R
+  end`,
+    asciiDiagram: `WRITE PATH
+  Writer ──► API Gateway ──► Tweet Service ──► Cassandra (tweet store)
+                                         └──► Kafka (tweet.created)
+                                                    │
+                                             Fan-out Workers
+                                                    │
+                                             Social Graph (MySQL)
+                                          ┌─────────┴─────────┐
+                                    regular user          celebrity
+                                   (<10K followers)     (≥10K followers)
+                                          │                   │
+                               ZADD feed:{uid}           SKIP fanout
+                               score=timestamp          (pull at read time)
+                               into Redis
+
+READ PATH
+  Reader ──► Feed Service
+                ├──► Redis ZREVRANGE feed:{uid}    (pre-built feed, O(1))
+                ├──► Cassandra latest N tweets     (celebrity merge, parallel)
+                ├──► Merge + sort by timestamp
+                ├──► ML ranking (top 500 → top 20)
+                └──► Redis tweet cache             (hydrate tweet_ids → objects)
+                          └──► Response { tweets[], next_cursor }`,
+    studyNotes: `## Hello Interview Format — Design Twitter Feed
+
+### Step 1: Requirements Clarification
+Always nail down scope first. Key questions to ask:
+- Home feed only, or also profile/search timelines?
+- Strictly chronological or algorithmic ranking?
+- What counts as "celebrity"? (configurable threshold)
+- What's acceptable staleness? (30s is fine for feeds)
+
+### Step 2: Capacity Estimates
+- 300M DAU × ~2 feed loads/day = 600M reads/day = ~7,000 reads/sec
+- 500M tweets/day = ~5,800 writes/sec
+- Fan-out amplification: avg 200 followers × 5,800 tweets/sec = 1.16M Redis writes/sec
+- Feed cache storage: 800 tweet_ids × 8 bytes × 300M users = ~1.9TB (fits in Redis cluster)
+
+### Step 3: Core Design Decision — Fan-out Strategy
+
+| Strategy | Read Cost | Write Cost | Use Case |
+|----------|-----------|------------|----------|
+| Fan-out on Write | O(1) ZRANGE | O(followers) per tweet | Regular users |
+| Fan-out on Read | O(following) merges | O(1) | Celebrities |
+| **Hybrid** | **O(1) + small merge** | **O(followers) only for small accounts** | **Twitter's approach** |
+
+### Step 4: Feed Cache (Redis Sorted Set)
+\`\`\`
+ZADD  feed:{user_id} {timestamp_ms} {tweet_id}   # on fan-out write
+ZREVRANGE feed:{user_id} 0 19                     # on feed read (top 20)
+ZREMRANGEBYRANK feed:{user_id} 0 -801             # trim to 800 entries
+\`\`\`
+
+### Step 5: Deep Dives (what interviewers probe)
+
+**Hot shard in Redis**
+- If millions read the same celebrity's tweets simultaneously, a single Redis node becomes a bottleneck
+- Solution: replicate that celebrity's tweet objects across N Redis nodes; route reads randomly across replicas
+
+**Inactive user reconstruction**
+- Don't keep feeds in Redis for users inactive > 30 days
+- On login: scan Cassandra for followed accounts' recent tweets, rebuild the sorted set
+
+**Pagination cursor design**
+- Use tweet_id as cursor (not page offset) — stable under concurrent inserts
+- Encode cursor as opaque base64 string in API response
+
+**Media upload flow**
+- Client requests a pre-signed S3 URL from Media Service
+- Client uploads directly to S3 (bypasses API servers)
+- S3 event triggers Lambda → generate thumbnails → store CDN URLs → update tweet record
+
+### What Senior vs Staff Covers
+- **Senior**: hybrid fan-out, Redis sorted set design, Cassandra choice, basic pagination
+- **Staff+**: hot shard mitigation, inactive user eviction, cursor stability, media pipeline, ML ranking pipeline, cross-DC replication strategy`,
   },
   {
     title: 'Design Instagram',

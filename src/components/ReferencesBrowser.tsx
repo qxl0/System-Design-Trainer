@@ -5,12 +5,15 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
   allReferenceLinks,
+  conceptGroups,
   latencyNumbers,
   powersOfTwo,
   referenceFolders,
   referenceSections,
   referenceTables,
+  type ConceptCard,
 } from '@/lib/references'
+import { RenderedMarkdown } from '@/components/MarkdownContent'
 
 function ExternalLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
@@ -88,6 +91,54 @@ function ExplorerItem({
   )
 }
 
+function ConceptCardItem({
+  card,
+  isExpanded,
+  onToggle,
+}: {
+  card: ConceptCard
+  isExpanded: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="rounded-xl border border-gray-800 bg-gray-950/70 transition-colors hover:border-gray-700">
+      <button type="button" onClick={onToggle} className="flex w-full items-start gap-3 p-4 text-left">
+        <span className="mt-0.5 shrink-0 text-xs text-gray-500">{isExpanded ? '▾' : '▸'}</span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-gray-100">{card.title}</div>
+          <p className="mt-0.5 text-sm leading-5 text-gray-400">{card.summary}</p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {card.tags.map((tag) => (
+              <span key={tag} className="rounded-full border border-gray-800 px-2 py-0.5 text-xs text-gray-500">
+                #{tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      </button>
+      {isExpanded && (
+        <div className="border-t border-gray-800 px-5 pb-5 pt-4">
+          <RenderedMarkdown content={card.body} className="space-y-3" />
+          {(card.relatedQuestions ?? []).length > 0 && (
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">Related:</span>
+              {card.relatedQuestions!.map((title) => (
+                <Link
+                  key={title}
+                  href={`/study?q=${encodeURIComponent(title)}`}
+                  className="rounded-full border border-blue-900 bg-blue-950/40 px-2.5 py-1 text-xs text-blue-200 hover:bg-blue-950/70"
+                >
+                  {title}
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ReferencesBrowser() {
   const searchParams = useSearchParams()
   const initialQuery = searchParams.get('q') ?? ''
@@ -96,6 +147,7 @@ export default function ReferencesBrowser() {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(referenceFolders.map((folder) => [folder.id, true]))
   )
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     setQuery(initialQuery)
@@ -135,6 +187,31 @@ export default function ReferencesBrowser() {
 
   const visibleSectionIds = new Set(filteredSections.map((section) => section.id))
 
+  const filteredConceptGroups = useMemo(() => {
+    if (!normalizedQuery) return conceptGroups
+    return conceptGroups
+      .map((group) => ({
+        ...group,
+        cards: group.cards.filter((card) => {
+          const haystack = [
+            group.title,
+            group.description,
+            card.title,
+            card.summary,
+            card.body,
+            ...card.tags,
+            ...(card.relatedQuestions ?? []),
+          ]
+            .join(' ')
+            .toLowerCase()
+          return haystack.includes(normalizedQuery)
+        }),
+      }))
+      .filter((group) => group.cards.length > 0)
+  }, [normalizedQuery])
+
+  const visibleConceptGroupIds = new Set(filteredConceptGroups.map((g) => g.id))
+
   const matchingQuestionTitles = useMemo(() => {
     const titles = filteredSections.flatMap((section) =>
       section.links.flatMap((link) => link.relatedQuestions ?? [])
@@ -170,14 +247,16 @@ export default function ReferencesBrowser() {
           .filter(
             (itemId) =>
               visibleSectionIds.has(itemId) ||
+              visibleConceptGroupIds.has(itemId) ||
               (!normalizedQuery && referenceTables.some((table) => table.id === itemId))
           )
           .map((itemId) => {
             const section = referenceSections.find((entry) => entry.id === itemId)
             const table = referenceTables.find((entry) => entry.id === itemId)
+            const group = conceptGroups.find((entry) => entry.id === itemId)
             return {
               id: itemId,
-              title: section?.title ?? table?.title ?? itemId,
+              title: section?.title ?? table?.title ?? group?.title ?? itemId,
             }
           })
 
@@ -186,7 +265,7 @@ export default function ReferencesBrowser() {
         return { ...folder, items }
       })
       .filter((folder): folder is NonNullable<typeof folder> => folder !== null)
-  }, [normalizedQuery, visibleSectionIds])
+  }, [normalizedQuery, visibleSectionIds, visibleConceptGroupIds])
 
   const toggleFolder = (folderId: string) => {
     setOpenFolders((current) => ({ ...current, [folderId]: !current[folderId] }))
@@ -348,6 +427,37 @@ export default function ReferencesBrowser() {
               </div>
             </section>
           )}
+
+          {filteredConceptGroups.map((group) => (
+            <section
+              key={group.id}
+              id={group.id}
+              className="rounded-2xl border border-gray-800 bg-gray-900/80 p-5"
+            >
+              <div className="mb-4 space-y-1">
+                <p className="text-xs uppercase tracking-[0.24em] text-gray-500">patterns</p>
+                <h2 className="text-lg font-semibold text-gray-100">{group.title}</h2>
+                <p className="text-sm leading-6 text-gray-400">{group.description}</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {group.cards.map((card) => (
+                  <ConceptCardItem
+                    key={card.id}
+                    card={card}
+                    isExpanded={expandedCards.has(card.id)}
+                    onToggle={() =>
+                      setExpandedCards((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(card.id)) next.delete(card.id)
+                        else next.add(card.id)
+                        return next
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
 
           {filteredSections.map((section) => (
             <section
